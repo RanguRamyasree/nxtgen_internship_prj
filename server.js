@@ -1,54 +1,95 @@
-// Install dependencies with: npm install express mongoose bcrypt jsonwebtoken cors
-
-const express = require("express");
-const mongoose = require("mongoose");
-const bcrypt = require("bcrypt");
-const jwt = require("jsonwebtoken");
-const cors = require("cors");
+// server.js
+const express = require('express');
+const http = require('http');
+const socketIo = require('socket.io');
+const mongoose = require('mongoose');
+const cors = require('cors');
 
 const app = express();
+const server = http.createServer(app);
+const io = socketIo(server, {
+  cors: {
+    origin: "http://localhost:3000",
+    methods: ["GET", "POST"]
+  }
+});
+
 app.use(cors());
 app.use(express.json());
 
-mongoose.connect("mongodb://localhost:27017/realtime-collab", {
+// MongoDB connection
+mongoose.connect('mongodb://localhost:27017/collaboration-tool', {
   useNewUrlParser: true,
-  useUnifiedTopology: true,
+  useUnifiedTopology: true
 });
 
-const userSchema = new mongoose.Schema({
-  name: String,
-  email: { type: String, unique: true },
-  password: String,
+// Document Schema
+const DocumentSchema = new mongoose.Schema({
+  title: String,
+  content: String,
+  lastModified: { type: Date, default: Date.now }
 });
-const User = mongoose.model("User", userSchema);
 
-app.post("/register", async (req, res) => {
+const Document = mongoose.model('Document', DocumentSchema);
+
+// Routes
+app.post('/api/documents', async (req, res) => {
   try {
-    const { name, email, password } = req.body;
-    const hashedPassword = await bcrypt.hash(password, 10);
-    const user = new User({ name, email, password: hashedPassword });
-    await user.save();
-    res.status(201).json({ message: "User registered successfully" });
-  } catch (err) {
-    res.status(400).json({ error: "Registration failed" });
+    const doc = new Document({
+      title: req.body.title,
+      content: req.body.content
+    });
+    await doc.save();
+    res.json(doc);
+  } catch (error) {
+    res.status(500).json({ error: 'Error creating document' });
   }
 });
 
-app.post("/login", async (req, res) => {
+app.get('/api/documents', async (req, res) => {
   try {
-    const { email, password } = req.body;
-    const user = await User.findOne({ email });
-    if (!user) return res.status(404).json({ error: "User not found" });
-
-    const isMatch = await bcrypt.compare(password, user.password);
-    if (!isMatch) return res.status(400).json({ error: "Invalid credentials" });
-
-    const token = jwt.sign({ id: user._id }, "secret", { expiresIn: "1h" });
-    res.status(200).json({ message: "Login successful", token });
-  } catch (err) {
-    res.status(500).json({ error: "Login failed" });
+    const documents = await Document.find().sort({ lastModified: -1 });
+    res.json(documents);
+  } catch (error) {
+    res.status(500).json({ error: 'Error fetching documents' });
   }
 });
 
-const PORT = 5000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+app.get('/api/documents/:id', async (req, res) => {
+  try {
+    const document = await Document.findById(req.params.id);
+    res.json(document);
+  } catch (error) {
+    res.status(500).json({ error: 'Error fetching document' });
+  }
+});
+
+// Socket.IO connection handling
+io.on('connection', (socket) => {
+  console.log('New client connected');
+
+  socket.on('join-document', (documentId) => {
+    socket.join(documentId);
+  });
+
+  socket.on('send-changes', (delta, documentId) => {
+    socket.broadcast.to(documentId).emit('receive-changes', delta);
+  });
+
+  socket.on('save-document', async (data) => {
+    try {
+      await Document.findByIdAndUpdate(data.documentId, { content: data.content });
+    } catch (error) {
+      console.error('Error saving document:', error);
+    }
+  });
+
+  socket.on('disconnect', () => {
+    console.log('Client disconnected');
+  });
+});
+
+const PORT = process.env.PORT || 5000;
+server.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
